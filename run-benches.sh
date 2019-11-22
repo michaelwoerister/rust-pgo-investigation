@@ -8,154 +8,80 @@ cd $root_dir/benchmerge
 cargo build
 benchmerge=$root_dir/benchmerge/target/debug/benchmerge
 
-# install the cargo-benchcmp tool
-# cargo install -f cargo-benchcmp
+install the cargo-benchcmp tool
+cargo install -f cargo-benchcmp
 
-# run non-PGO benchmarks
-rm -rf $root_dir/non-pgo-timings
-mkdir -p $root_dir/non-pgo-timings
+function run_benchmark() {
+     local timings_dir=$1
+     local rust_flags=$2
 
-cd $root_dir/regex
-rustup override set nightly
-cargo clean
+     # run non-PGO benchmarks with 1 cgu
+     rm -rf $root_dir/$timings_dir
+     mkdir -p $root_dir/$timings_dir
 
-cd $root_dir/regex/bench
+     cd $root_dir/regex
+     rustup override set nightly
+     cargo clean
 
-for i in {1..20}
-do
-    echo "Non-PGO benchmark pass $i of 20"
-    ./run rust > $root_dir/non-pgo-timings/timings-`date +%s`.txt
-done
+     cd $root_dir/regex/bench
 
-# merge the benchmark results from the non-PGO benchmarks
-cd $root_dir/non-pgo-timings
-$benchmerge
+     echo "RUSTFLAGS=$rust_flags"
 
-# run PGO benchmarks with higher pre-inlining threshold
-#
-# (1) run benchmarks with instrumentation enabled
-cd $root_dir/regex
-cargo clean
+     for i in {1..15}
+     do
+         echo "$timings_dir: Pass $i of 15"
+         RUSTFLAGS="$rust_flags" ./run rust > $root_dir/$timings_dir/timings-`date +%s`.txt
+     done
 
-rm -rf $root_dir/regex-samples-threshold-150
-mkdir -p $root_dir/regex-samples-threshold-150
+     # merge the benchmark results from the non-PGO benchmarks
+     cd $root_dir/$timings_dir
+     $benchmerge
+}
 
-cd $root_dir/regex/bench
+function run_instrumented_benchmark() {
+     local caption=$1
+     local rust_flags=$2
 
-for i in {1..4}
-do
-    echo "PGO Instrumentation pass $i of 4 (higher pre-inlining threshold)"
-    RUSTFLAGS="-Cprofile-generate=$root_dir/regex-samples-threshold-150 -Cllvm-args=-preinline-threshold=150" ./run rust > /dev/null
-done
+     cd $root_dir/regex
+     rustup override set nightly
+     cargo clean
 
-# (2) merge the profiling data
-llvm-profdata merge -o $root_dir/regex-samples-threshold-150/merged.profdata $root_dir/regex-samples-threshold-150
+     cd $root_dir/regex/bench
 
-# (3) run benchmarks with PGO applied
-rm -rf $root_dir/pgo-timings-threshold-150
-mkdir -p $root_dir/pgo-timings-threshold-150
+     echo "RUSTFLAGS=$rust_flags"
 
-for i in {1..20}
-do
-    echo "PGO benchmark pass $i of 20 (higher pre-inlining threshold)"
-    RUSTFLAGS="-Cprofile-use=$root_dir/regex-samples-threshold-150/merged.profdata -Cllvm-args=-preinline-threshold=150" ./run rust > $root_dir/pgo-timings-threshold-150/timings-`date +%s`.txt
-done
+     for i in {1..4}
+     do
+         echo "$caption: Pass $i of 4"
+         RUSTFLAGS="$rust_flags" ./run rust
+     done
+}
 
-# merge the benchmark results from the PGO benchmarks
-cd $root_dir/pgo-timings-threshold-150
-$benchmerge
+function run_pgo_benchmark() {
 
+     local caption=$1
+     local profile_directory=$2
+     local cgu_count=$3
 
+     rm -rf $root_dir/$profile_directory
+     mkdir -p $root_dir/$profile_directory
 
-
-
-
-
-# run PGO benchmarks
-#
-# (1) run benchmarks with instrumentation enabled
-cd $root_dir/regex
-cargo clean
-
-rm -rf $root_dir/regex-samples-threshold-75
-mkdir -p $root_dir/regex-samples-threshold-75
-
-cd $root_dir/regex/bench
-
-for i in {1..4}
-do
-    echo "PGO Instrumentation pass $i of 4"
-    RUSTFLAGS="-Cprofile-generate=$root_dir/regex-samples-threshold-75" ./run rust > /dev/null
-done
-
-# (2) merge the profiling data
-llvm-profdata merge -o $root_dir/regex-samples-threshold-75/merged.profdata $root_dir/regex-samples-threshold-75
-
-# (3) run benchmarks with PGO applied
-rm -rf $root_dir/pgo-timings-threshold-75
-mkdir -p $root_dir/pgo-timings-threshold-75
-
-for i in {1..20}
-do
-    echo "PGO benchmark pass $i of 20"
-    RUSTFLAGS="-Cprofile-use=$root_dir/regex-samples-threshold-75/merged.profdata" ./run rust > $root_dir/pgo-timings-threshold-75/timings-`date +%s`.txt
-done
-
-# merge the benchmark results from the PGO benchmarks
-cd $root_dir/pgo-timings-threshold-75
-$benchmerge
+     run_instrumented_benchmark "$1-generate" "-Ccodegen-units=$cgu_count \
+                                               -Clinker=clang-8 \
+                                               -Cllvm-args=-import-instr-limit=10 \
+                                               -Clink-args=-fuse-ld=lld \
+                                               -Cprofile-generate=$root_dir/$profile_directory"
+     llvm-profdata merge -o $root_dir/$profile_directory/merged.profdata $root_dir/$profile_directory
+     run_benchmark "$1-use" "-Ccodegen-units=$cgu_count \
+                             -Clinker=clang-8 \
+                             -Cllvm-args=-import-instr-limit=10 \
+                             -Clink-args=-fuse-ld=lld \
+                             -Cprofile-use=$root_dir/$profile_directory/merged.profdata"
+}
 
 
+run_benchmark "final-non-pgo-1-cgu-instr-limit" "-Ccodegen-units=1 -Clinker=clang-8 -Clink-args=-fuse-ld=lld -Cllvm-args=-import-instr-limit=10"
+run_benchmark "final-non-pgo-N-cgus-instr-limit" "-Ccodegen-units=1000 -Clinker=clang-8 -Clink-args=-fuse-ld=lld -Cllvm-args=-import-instr-limit=10"
 
-
-
-
-
-
-
-
-# run PGO benchmarks with pre-inlining pass disabled
-#
-# (1) run benchmarks with instrumentation enabled
-cd $root_dir/regex
-cargo clean
-
-rm -rf $root_dir/regex-samples-no-preinlining
-mkdir -p $root_dir/regex-samples-no-preinlining
-
-cd $root_dir/regex/bench
-
-for i in {1..4}
-do
-    echo "PGO Instrumentation pass $i of 4 (no pre-inlining)"
-    RUSTFLAGS="-Cprofile-generate=$root_dir/regex-samples-no-preinline -Zdisable-instrumentation-preinliner" ./run rust > /dev/null
-done
-
-# (2) merge the profiling data
-llvm-profdata merge -o $root_dir/regex-samples-no-preinline/merged.profdata $root_dir/regex-samples-no-preinline
-
-# (3) run benchmarks with PGO applied
-rm -rf $root_dir/pgo-timings-no-preinline
-mkdir -p $root_dir/pgo-timings-no-preinline
-
-for i in {1..20}
-do
-    echo "PGO benchmark pass $i of 20 (no pre-inlining)"
-    RUSTFLAGS="-Cprofile-use=$root_dir/regex-samples-no-preinline/merged.profdata -Zdisable-instrumentation-preinliner" ./run rust > $root_dir/pgo-timings-no-preinline/timings-`date +%s`.txt
-done
-
-# merge the benchmark results from the PGO benchmarks
-cd $root_dir/pgo-timings-no-preinline
-$benchmerge
-
-
-
-# echo "COMPARISON - Regular PGO vs PGO without pre-inlining pass"
-# cargo benchcmp $root_dir/pgo-timings/merged-timings.txt $root_dir/pgo-timings-no-preinline/merged-timings.txt | tee $root_dir/comparison-pgo-pre-inlining-vs-no-pre-inlining.txt
-
-# echo "COMPARISON - Regular Non-PGO vs Regular PGO (=with pre-inlining pass)"
-# cargo benchcmp $root_dir/non-pgo-timings/merged-timings.txt $root_dir/pgo-timings/merged-timings.txt | tee $root_dir/comparison-no-pgo-vs-pgo.txt
-
-# echo "COMPARISON - Regular Non-PGO vs PGO *without* pre-inlining pass"
-# cargo benchcmp $root_dir/non-pgo-timings/merged-timings.txt $root_dir/pgo-timings-no-preinline/merged-timings.txt | tee $root_dir/comparison-no-pgo-vs-pgo-no-pre-inlining.txt
-
+run_pgo_benchmark "final-pgo-1-cgu-instr-limit" "final-pgo-data-1-cgu-instr-limit" 1
+run_pgo_benchmark "final-pgo-N-cgus-instr-limit" "final-pgo-data-N-cgus-instr-limit" 1000
